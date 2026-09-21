@@ -1,0 +1,22 @@
+# fiorino-tab standalone repo (.gitignore)
+__pycache__/
+*.py[cod]
+*.egg-info/
+*html
+*bootstrap
+*clipboard
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+.env
+# weights are downloaded from HuggingFace, never vendored
+*.pt
+*.safetensors
+*.bin
+*.as_pt_cache.pt
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
