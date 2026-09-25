@@ -56,7 +56,7 @@ def _arch_for_weights(weights_path: str, ckpt) -> dict:
     is authoritative; ckpt_arch (stored record, then key sniffing) stays
     only as fallback for bare local files.
     """
-    from ._arch import ckpt_arch
+    from ._arch import ARCH_SHA, ckpt_arch
     cfg = Path(str(weights_path)).parent / "config.json"
     if cfg.exists():
         import json
@@ -64,6 +64,13 @@ def _arch_for_weights(weights_path: str, ckpt) -> dict:
             c = json.loads(cfg.read_text())
         except (OSError, ValueError):
             return ckpt_arch(ckpt)
+        pin = c.get("arch_sha")
+        if pin is not None and str(pin) != ARCH_SHA:
+            import warnings
+            warnings.warn("Snapshot staleness: checkpoint config arch_sha "
+                          f"{str(pin)!r} != snapshot {ARCH_SHA!r} "
+                          "(re-sync _arch.py from the training tree). "
+                          "Loading anyway.", stacklevel=3)
         if c.get("reg_head_type") in ("bucket", "mdn", "zhead", "quant",
                                       "qraw", "none"):
             return {"col_emb": bool(c.get("col_emb", True)),

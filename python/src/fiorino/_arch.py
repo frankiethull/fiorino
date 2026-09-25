@@ -32,6 +32,13 @@ import torch.nn.functional as F
 from torch import nn
 
 
+# Pin of the authoritative training-tree model.py this snapshot was
+# re-synced from (training export writes it as config.json "arch_sha").
+# The loader warns when a checkpoint's config carries a different pin:
+# cross-tree staleness detection. Update on every re-sync.
+ARCH_SHA = "6c6a60cfc5e8"
+
+
 # ---------------------------------------------------------------------------
 # Reused from modded-nanoTabPFN (borawhocodess), Apache-2.0.
 # Adapted, not verbatim copied.
