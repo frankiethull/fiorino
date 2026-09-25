@@ -11,7 +11,7 @@ def _data(n=60, c=6, seed=0):
 
 
 def test_classifier(checkpoint, device):
-    from fiorino_tab import FiorinoClassifier
+    from fiorino import FiorinoClassifier
     X, rng = _data()
     y = (X["f0"] + 0.5 * X["f1"] > 0).astype(int)
     clf = FiorinoClassifier(checkpoint=checkpoint, device=device)
@@ -27,9 +27,11 @@ def test_regressor(checkpoint, device, cls_only_artifact):
     if cls_only_artifact:
         import pytest
         pytest.skip("classification-only artifact (regression ships in bifronte)")
-    from fiorino_tab import FiorinoRegressor
+    from fiorino import FiorinoRegressor
     X, rng = _data()
-    y = (2 * X["f0"] - X["f2"] + 0.1 * rng.normal(size=len(X))).to_numpy()
+    # Bucket head models log1p(y): targets must be non-negative.
+    y = (np.abs(2 * X["f0"] - X["f2"]) + 0.5
+         + 0.1 * np.abs(rng.normal(size=len(X)))).to_numpy()
     reg = FiorinoRegressor(checkpoint=checkpoint, device=device)
     reg.fit(X.iloc[:40], y[:40])
     pred = reg.predict(X.iloc[40:])

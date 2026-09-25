@@ -13,7 +13,7 @@ import pandas as pd
 import torch
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 
-from ._arch import FiorinoNanoModel, ckpt_arch, load_ckpt_compat
+from ._arch import FiorinoNanoModel, load_ckpt_compat
 from . import _data as D
 
 
@@ -32,6 +32,46 @@ def _safetensors_to_pt(path: str) -> str:
         sd = load_file(path, device="cpu")
         torch.save({"model_state_dict": sd}, out)
     return out
+
+
+def _quant_grid_name(levels) -> str:
+    """Map a quant_grid record (name or level list) to a constructor key."""
+    if isinstance(levels, str):
+        return levels if levels in ("nine", "nori5") else "nine"
+    try:
+        lv = tuple(float(v) for v in levels)
+    except TypeError:
+        return "nine"
+    if lv == (0.1, 0.25, 0.5, 0.75, 0.9):
+        return "nori5"
+    return "nine"
+
+
+def _arch_for_weights(weights_path: str, ckpt) -> dict:
+    """Resolve arch flags for a weights file, preferring the repo config.
+
+    Key-presence heuristics misfire because unification-era checkpoints
+    carry every head's params (a bucket file can contain random mdn_head
+    weights -> looks like an MDN model -> decodes garbage). config.json
+    is authoritative; ckpt_arch (stored record, then key sniffing) stays
+    only as fallback for bare local files.
+    """
+    from ._arch import ckpt_arch
+    cfg = Path(str(weights_path)).parent / "config.json"
+    if cfg.exists():
+        import json
+        try:
+            c = json.loads(cfg.read_text())
+        except (OSError, ValueError):
+            return ckpt_arch(ckpt)
+        if c.get("reg_head_type") in ("bucket", "mdn", "zhead", "quant",
+                                      "qraw", "none"):
+            return {"col_emb": bool(c.get("col_emb", True)),
+                    "pool_mode": c.get("pool_mode", "mean"),
+                    "reg_head_type": c["reg_head_type"],
+                    "mask_thinking": bool(c.get("mask_thinking", False)),
+                    "quant_grid": c.get("quant_grid", "nine")}
+    return ckpt_arch(ckpt)
 
 
 class _BaseFiorino(BaseEstimator):
@@ -64,12 +104,16 @@ class _BaseFiorino(BaseEstimator):
             # Not a local path -> treat as an HF repo id.
             ckpt = self._download_weights(str(ckpt))
         if str(ckpt).endswith(".safetensors"):
+            weights_path = str(ckpt)
             ckpt = _safetensors_to_pt(str(ckpt))
-        arch = ckpt_arch(torch.load(ckpt, map_location="cpu"))
+        else:
+            weights_path = str(ckpt)
+        arch = _arch_for_weights(weights_path, torch.load(ckpt, map_location="cpu"))
         model = FiorinoNanoModel(
             col_emb=arch["col_emb"], pool_mode=arch["pool_mode"],
             reg_head_type=arch["reg_head_type"],
-            mask_thinking=arch.get("mask_thinking", False))
+            mask_thinking=arch.get("mask_thinking", False),
+            quant_grid=_quant_grid_name(arch.get("quant_grid", "nine")))
         load_ckpt_compat(model, ckpt)
         self._model = model.to(_device(self.device)).eval()
         return self._model
@@ -155,7 +199,7 @@ class FiorinoClassifier(_BaseFiorino, ClassifierMixin):
 
 
 class FiorinoRegressor(_BaseFiorino, RegressorMixin):
-    """In-context tabular regressor (bucket head + expected-value decode)."""
+    """In-context tabular regressor (bucket or MDN head + expected-value decode)."""
     HF_WEIGHTS = ("fiorino-regression-bifronte.pt",
                   "fiorino-regression-bifronte.safetensors")
 
@@ -185,16 +229,25 @@ class FiorinoRegressor(_BaseFiorino, RegressorMixin):
         self.y_bucket_ = ids.astype(np.float32)
         self.y_stats_ = D.reg_stats(tvf)
         model = self._load_model()
-        if getattr(model, "reg_head_type", "bucket") != "bucket":
+        self.reg_head_ = getattr(model, "reg_head_type", "bucket")
+        if self.reg_head_ not in ("bucket", "mdn"):
             import warnings
-            warnings.warn("FiorinoRegressor v1 decodes bucket logits; this "
-                          "checkpoint uses a different reg head — predictions "
-                          "may be off. Use a bucket checkpoint.")
+            warnings.warn("FiorinoRegressor decodes bucket/MDN heads; this "
+                          "checkpoint uses "
+                          f"{self.reg_head_!r} — predictions may be off.")
         return self
 
     def predict(self, X):
+        from ._arch import mdn_mean
         Xq = pd.DataFrame(X).reset_index(drop=True)
-        logits = self._forward(Xq).numpy()
+        out = self._forward(Xq)
+        if getattr(self, "reg_head_", "bucket") == "mdn":
+            model = self._load_model()
+            mu_log = mdn_mean(out, int(getattr(model, "mdn_k", 8)))
+            # expm1 has no bf16 CUDA kernel: decode in float32.
+            pred = torch.expm1(mu_log.float().clamp(max=20.0))
+            return pred.detach().cpu().numpy().astype(float).ravel()
+        logits = out.numpy()
         K = min(logits.shape[1], len(self.centers_))
         p = torch.softmax(torch.from_numpy(logits[:, :K]), dim=-1).numpy()
         p = p / p.sum(axis=1, keepdims=True)
