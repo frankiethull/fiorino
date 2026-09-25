@@ -1,0 +1,20 @@
+Package: fiorino
+Title: In-Context Tabular Foundation Models (FiorinoNano)
+Version: 0.1.0
+Authors@R: person("frank", "hull", email = "frankiethull@gmail.com",
+                  role = c("aut", "cre"))
+Description: R interface to FiorinoNano tabular foundation models for
+    in-context learning on tabular data. `fiorino_classifier()` and
+    `fiorino_regressor()` store the training set as an in-context prompt
+    (no gradients) and answer queries in one forward pass, via the Python
+    `fiorino` package over reticulate. Weights download once from
+    Hugging Face (`Nanite-Labs/nanites-fiorino-tabular`).
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+Imports:
+    reticulate
+Suggests:
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3
+Config/roxygen2/version: 8.1.0

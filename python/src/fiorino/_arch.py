@@ -4,7 +4,6 @@ the nanites monorepo (for the standalone fiorino-tab package). The monorepo
 copy is authoritative; re-sync on release. Model code is MIT (lab).
 Checkpoints carry their own arch record (see ckpt_arch); loaders below
 adapt automatically.
-
 FiorinoNano — A small tabular foundation model for in-context learning.
 
 Architecture inspired by (NOT a copy of):
@@ -441,6 +440,7 @@ class FiorinoNanoModel(nn.Module):
         col_emb: bool = False,
         reg_head_type: str = "bucket",
         mask_thinking: bool = False,
+        quant_grid: str = "nine",
     ):
         super().__init__()
         self.l = l
@@ -492,9 +492,12 @@ class FiorinoNanoModel(nn.Module):
         # checkpoints keep their qhead shapes.
         self.quant_levels = (0.05, 0.1, 0.25, 0.35, 0.5, 0.65, 0.75,
                              0.9, 0.95)
+        if quant_grid == "nori5":
+            # Nori training default: 5 levels (tests the few-quantiles
+            # posit — fewer levels, more capacity each, less crossing).
+            self.quant_levels = (0.1, 0.25, 0.5, 0.75, 0.9)
         self.qhead = nn.Linear(e, len(self.quant_levels))
         self.reg_head_type = reg_head_type
-
     def _forward(self, x_src: torch.Tensor, y_src: torch.Tensor, sep: int,
                  missing: torch.Tensor | None = None,
                  col_types: torch.Tensor | None = None,
@@ -534,7 +537,7 @@ class FiorinoNanoModel(nn.Module):
         else:
             features = output[:, sep:, :C, :]  # (B, n_test, C, E)
         if is_reg and self.reg_head_type not in (
-                "bucket", "mdn", "zhead", "quant"):
+                "bucket", "mdn", "zhead", "quant", "qraw"):
             raise RuntimeError(
                 "classification-only release (reg_head_type="
                 f"{self.reg_head_type!r}): regression ships when it beats "
@@ -548,7 +551,7 @@ class FiorinoNanoModel(nn.Module):
         if is_reg and self.reg_head_type == "zhead":
             pooled = features.mean(dim=2) if features.ndim == 4 else features
             return self.zhead(pooled)
-        if is_reg and self.reg_head_type == "quant":
+        if is_reg and self.reg_head_type in ("quant", "qraw"):
             pooled = features.mean(dim=2) if features.ndim == 4 else features
             return self._ordered_quantiles(self.qhead(pooled))
         logits = (self.reg_decoder if is_reg else self.decoder)(
@@ -693,15 +696,72 @@ def quantile_dist_mean(q: torch.Tensor, taus) -> torch.Tensor:
     return torch.where(torch.isfinite(out), out, simp)
 
 
+def qraw_loss_and_decode(pred_q: torch.Tensor, y_raw_test, y_raw_train,
+                         taus, tail_w: float = 0.0,
+                         decode: str = "median") -> tuple:
+    """Raw-space quantile head (Nori-style context normalization, no log):
+    pinball over taus on z=(y-mu)/sd with RELATIVE-floored train std
+    (floor 1% of |mu|+1 — narrow-range tasks keep their scale instead of
+    being inflated 10x by the log-head's absolute 0.5 floor, whose expm1
+    inversion then turns small z-errors into range-scale raw errors).
+    Decode inverts affinely (no exp): median / trapezoidal mean /
+    exp-tail mean (safe here — affine, caller winsorizes to support).
+    Returns (loss, pred_raw_np)."""
+    dev = pred_q.device
+    K = len(taus)
+    tr = np.asarray(y_raw_train, dtype=float)
+    tr = tr[np.isfinite(tr)]
+    mu = float(np.mean(tr)) if len(tr) else 0.0
+    sd = float(np.std(tr)) if len(tr) else 1.0
+    sd = max(sd, 1e-2 * (abs(mu) + 1.0))
+    yt = torch.as_tensor(np.asarray(y_raw_test, dtype=np.float32),
+                         device=dev).reshape(-1)
+    m = torch.isfinite(yt)
+    pq = pred_q.reshape(-1, K)
+    t = torch.as_tensor(np.asarray(taus, dtype=np.float32),
+                        device=dev).view(1, K)
+    if bool(m.any()):
+        yl = (yt[m].float() - mu) / (sd + 1e-8)
+        d = yl.unsqueeze(-1) - pq[m]
+        pin = torch.maximum(t * d, (t - 1.0) * d)
+        if tail_w > 0:
+            w = 1.0 + float(tail_w) * (2.0 * (t - 0.5).abs())
+            pin = pin * w
+        loss = pin.mean()
+    else:
+        loss = torch.zeros((), device=dev)
+    with torch.no_grad():
+        pqd = pq.float().detach()
+        _midx = int(min(range(K),
+                        key=lambda i: abs(float(np.asarray(taus)[i]) - 0.5)))
+        if decode == "median":
+            mz = pqd[:, _midx]
+        elif decode == "mean":
+            tau = torch.as_tensor(np.asarray(taus, dtype=np.float64),
+                                  device=dev, dtype=torch.float32)
+            dt = tau[1:] - tau[:-1]
+            mz = (tau[0] * pqd[:, 0]
+                  + (0.5 * (pqd[:, :-1] + pqd[:, 1:]) * dt).sum(-1)
+                  + (1.0 - tau[-1]) * pqd[:, -1])
+            mz = torch.where(torch.isfinite(mz), mz, pqd[:, _midx])
+        else:
+            mz = quantile_dist_mean(pqd, taus)
+        pred_np = (mz * sd + mu).detach().cpu().numpy()
+    return loss, np.asarray(pred_np, dtype=float)
+
+
 def quant_loss_and_decode(pred_q: torch.Tensor, y_raw, taus,
                           mean: float, std: float,
-                          tail_w: float = 0.0) -> tuple:
+                          tail_w: float = 0.0,
+                          decode: str = "tailmean") -> tuple:
     """Direct quantile head (EXAONE-style) as a full stack (Nori-style):
     pinball over taus in LOG-standardized space with levels weighted
     linearly outward (w=1+tail_w*2|t-0.5| — extreme quantiles set the
     tails, so they pay more), monotone by construction (ordered
-    reparameterization), point decode = analytical quantile-function mean
-    with exponential tail extrapolation, inverted to raw.
+    reparameterization). Point decode (inference-only; loss is pure
+    pinball): "median" (robust middle quantile), "mean" (trapezoidal
+    quantile-function mean), "tailmean" (mean + exponential tail
+    extrapolation). Inverted to raw.
     pred_q: (..., K); taus: sequence; y_raw: raw targets (NaN-tolerant);
     mean/std: log-space train stats (std floored at 0.5, see zhead).
     Returns (loss, pred_raw_np)."""
@@ -725,7 +785,21 @@ def quant_loss_and_decode(pred_q: torch.Tensor, y_raw, taus,
     else:
         loss = torch.zeros((), device=dev)
     with torch.no_grad():
-        mz = quantile_dist_mean(pq.float().detach(), taus)
+        pqd = pq.float().detach()
+        _midx = int(min(range(K),
+                        key=lambda i: abs(float(np.asarray(taus)[i]) - 0.5)))
+        if decode == "median":
+            mz = pqd[:, _midx]
+        elif decode == "mean":
+            tau = torch.as_tensor(np.asarray(taus, dtype=np.float64),
+                                  device=dev, dtype=torch.float32)
+            dt = tau[1:] - tau[:-1]
+            mz = (tau[0] * pqd[:, 0]
+                  + (0.5 * (pqd[:, :-1] + pqd[:, 1:]) * dt).sum(-1)
+                  + (1.0 - tau[-1]) * pqd[:, -1])
+            mz = torch.where(torch.isfinite(mz), mz, pqd[:, _midx])
+        else:
+            mz = quantile_dist_mean(pqd, taus)
         raw = torch.expm1((mz * std + mean).clamp(-8, 20.0))
         pred_np = raw.detach().cpu().numpy()
     return loss, np.asarray(pred_np, dtype=float)
@@ -754,9 +828,10 @@ def ckpt_arch(ckpt_or_sd) -> dict:
     keys silently disabled col_emb in all early evals.)"""
     if isinstance(ckpt_or_sd, dict) and "model_state_dict" in ckpt_or_sd:
         rec = {k: ckpt_or_sd.get(k) for k in
-               ("reg_head_type", "pool_mode", "col_emb", "mask_thinking")}
+               ("reg_head_type", "pool_mode", "col_emb", "mask_thinking",
+                "quant_grid")}
         if rec["reg_head_type"] in ("bucket", "mdn", "zhead", "quant",
-                                    "none"):
+                                    "qraw", "none"):
             return {"col_emb": bool(ckpt_or_sd.get(
                         "col_emb",
                         _keys_arch(ckpt_or_sd["model_state_dict"])["col_emb"])),
@@ -764,7 +839,8 @@ def ckpt_arch(ckpt_or_sd) -> dict:
                         "pool_mode",
                         _keys_arch(ckpt_or_sd["model_state_dict"])["pool_mode"]),
                     "reg_head_type": rec["reg_head_type"],
-                    "mask_thinking": bool(ckpt_or_sd.get("mask_thinking", False))}
+                    "mask_thinking": bool(ckpt_or_sd.get("mask_thinking", False)),
+                    "quant_grid": rec.get("quant_grid") or [0.05, 0.1, 0.25, 0.35, 0.5, 0.65, 0.75, 0.9, 0.95]}
         sd = ckpt_or_sd["model_state_dict"]
     else:
         sd = ckpt_or_sd

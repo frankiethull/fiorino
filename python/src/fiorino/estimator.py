@@ -35,11 +35,13 @@ def _safetensors_to_pt(path: str) -> str:
 
 
 class _BaseFiorino(BaseEstimator):
-    # Fiorino alfa release: HF repo Nanite-Labs/nanites-fiorino-tabular,
-    # weights file fiorino-classification-alfa.(pt|safetensors); sister
+    # Fiorino releases: HF repo Nanite-Labs/nanites-fiorino-tabular;
+    # per-head weights (bifronte+), alfa file kept as fallback. Sister
     # GitHub repo "fiorino".
     HF_REPO = "Nanite-Labs/nanites-fiorino-tabular"
-    HF_WEIGHTS = ("fiorino-classification-alfa.pt",
+    HF_WEIGHTS = ("fiorino-classification-bifronte.pt",
+                  "fiorino-classification-bifronte.safetensors",
+                  "fiorino-classification-alfa.pt",
                   "fiorino-classification-alfa.safetensors")
 
     def __init__(self, checkpoint=None,
@@ -154,6 +156,8 @@ class FiorinoClassifier(_BaseFiorino, ClassifierMixin):
 
 class FiorinoRegressor(_BaseFiorino, RegressorMixin):
     """In-context tabular regressor (bucket head + expected-value decode)."""
+    HF_WEIGHTS = ("fiorino-regression-bifronte.pt",
+                  "fiorino-regression-bifronte.safetensors")
 
     def _is_reg(self):
         return True

@@ -2,9 +2,6 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-*html
-*bootstrap
-*clipboard
 build/
 dist/
 .pytest_cache/
@@ -20,3 +17,10 @@ venv/
 .vscode/
 .idea/
 .DS_Store
+# R
+.Rhistory
+.RData
+.Rproj.user/
+# rendered README artifacts (local only, never commit)
+README.html
+README_files/

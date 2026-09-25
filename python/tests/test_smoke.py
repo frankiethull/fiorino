@@ -26,7 +26,7 @@ def test_classifier(checkpoint, device):
 def test_regressor(checkpoint, device, cls_only_artifact):
     if cls_only_artifact:
         import pytest
-        pytest.skip("classification-only artifact (regression ships in beta)")
+        pytest.skip("classification-only artifact (regression ships in bifronte)")
     from fiorino_tab import FiorinoRegressor
     X, rng = _data()
     y = (2 * X["f0"] - X["f2"] + 0.1 * rng.normal(size=len(X))).to_numpy()

@@ -27,7 +27,7 @@ def _col_type(name, series) -> int:
 def fit_preprocessor(X: pd.DataFrame) -> dict:
     X = pd.DataFrame(X)
     if X.shape[1] > MAX_COLS:
-        raise ValueError(f"fiorino-tab supports <={MAX_COLS} features, got {X.shape[1]}")
+        raise ValueError(f"fiorino supports <={MAX_COLS} features, got {X.shape[1]}")
     const = [c for c in X.columns if X[c].nunique(dropna=True) <= 1]
     if const:
         X = X.drop(columns=const)

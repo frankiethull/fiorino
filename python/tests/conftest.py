@@ -1,4 +1,4 @@
-"""Pytest config for fiorino-tab: --checkpoint (local file or HF repo id),
+"""Pytest config for fiorino: --checkpoint (local file or HF repo id),
 --device, --cls-only (skip regressor test for classification-only artifacts)."""
 import pytest
 
